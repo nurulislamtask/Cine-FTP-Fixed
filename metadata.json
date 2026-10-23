@@ -1,0 +1,6 @@
+{
+  "name": "CineFTP — Live FTP & Open Directory Cinema Browser",
+  "description": "Transform any FTP or HTTP open directory server into a modern movie and TV series streaming platform with automatic poster indexing and a multi-audio cinema player.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
