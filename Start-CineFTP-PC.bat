@@ -2,6 +2,26 @@
 title CineFTP - PC Server (bondho korle site o bondho)
 color 0A
 cd /d %~dp0
+echo %~dp0 | findstr /I /C:".zip" >nul
+if not errorlevel 1 (
+  echo.
+  echo ============================================================
+  echo   BHUL JAYGAY CHALECHO! Zip er VITORE theke chalano jabe na.
+  echo   Age zip ta Extract All kore real folder ber koro,
+  echo   tarpor oi folder er vitor theke ei file ta chalao.
+  echo ============================================================
+  echo.
+  pause
+  exit /b
+)
+if not exist "%~dp0server.ts" (
+  echo.
+  echo Ei folder e CineFTP er file nai - vul folder theke chalano hocche.
+  echo Extract kora Cine-FTP-Fixed folder er vitor theke chalao.
+  echo.
+  pause
+  exit /b
+)
 echo ================================================
 echo   CineFTP PC Server chalu hocche...
 echo ================================================
@@ -21,6 +41,12 @@ if not exist node_modules (
 echo.
 echo Site build hocche (notun version thakle setai ashbe)...
 call npm run build
+if errorlevel 1 (
+  echo.
+  echo Build FAIL koreche - uporer error ta dekho. Server chalu hobe na.
+  pause
+  exit /b
+)
 set PORT=3000
 set NODE_ENV=production
 echo.
