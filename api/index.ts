@@ -4,6 +4,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 import express from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { spawn, spawnSync } from 'child_process';
+import { existsSync } from 'fs';
 import http from 'http';
 import https from 'https';
 import net from 'net';
@@ -2487,6 +2488,69 @@ app.get(['/api/probe', '/probe'], async (req, res) => {
 /**
  * API: Direct HTTP Range Stream Proxy
  */
+/**
+ * PC app mode: open the current title in VLC on THIS machine.
+ * ftpbd URLs are first resolved to their DhakaFlix originals, so the seed /
+ * featured titles play too. VLC plays every format (MKV/HEVC/AC3) natively,
+ * which makes this the most reliable playback path on the user's own PC.
+ * ?test=1 resolves and reports without launching VLC (diagnostics).
+ */
+app.get(['/api/open-vlc', '/open-vlc'], async (req, res) => {
+  if (IS_VERCEL_ENV) {
+    res
+      .status(400)
+      .json({ ok: false, error: 'VLC sudhu PC server theke khola jay, Vercel theke na.' });
+    return;
+  }
+  const raw = String(req.query.url || '').trim();
+  if (!/^https?:\/\//i.test(raw)) {
+    res.status(400).json({ ok: false, error: 'Invalid url' });
+    return;
+  }
+  const resolved = await resolveLocalBdixMirror(raw);
+  const finalUrl = resolved || raw;
+  const vlcCandidates = [
+    process.env.VLC_PATH || '',
+    'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe',
+    'C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe',
+  ].filter(Boolean);
+  const vlcPath =
+    vlcCandidates.find((p) => {
+      try {
+        return existsSync(p);
+      } catch {
+        return false;
+      }
+    }) || (process.platform !== 'win32' ? 'vlc' : '');
+  if (String(req.query.test || '') === '1') {
+    res.json({
+      ok: true,
+      test: true,
+      input: raw,
+      resolved,
+      finalUrl,
+      vlcFound: Boolean(vlcPath),
+      vlcPath: vlcPath || null,
+    });
+    return;
+  }
+  if (!vlcPath) {
+    res.status(404).json({
+      ok: false,
+      error: 'Ei PC te VLC pawa jay nai. Age videolan.org theke VLC install koro.',
+      finalUrl,
+    });
+    return;
+  }
+  try {
+    const child = spawn(vlcPath, [finalUrl], { detached: true, stdio: 'ignore' });
+    child.unref();
+    res.json({ ok: true, finalUrl, vlcPath });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message || 'VLC launch failed', finalUrl });
+  }
+});
+
 app.get(['/api/stream', '/stream'], (req, res) => {
   const videoUrl = String(req.query.url || '').trim();
   if (!videoUrl) {

@@ -494,6 +494,21 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     window.setTimeout(() => setToastMessage(null), 3500);
   }, []);
 
+  // PC app mode: ask the local server to open this title in VLC on the PC.
+  // The server resolves ftpbd URLs to their DhakaFlix originals first, and
+  // VLC plays every format — the most reliable path on the user's own PC.
+  const openInVlcApp = useCallback(async () => {
+    try {
+      showToast('VLC te khulchi...');
+      const r = await fetch(`/api/open-vlc?url=${encodeURIComponent(safePlayableUrl)}`);
+      const j = await r.json().catch(() => null);
+      if (j?.ok) showToast('VLC khule geche — PC screen e dekho!');
+      else showToast(j?.error || 'VLC khola jay nai');
+    } catch {
+      showToast('VLC khola jay nai — PC server cholche kina dekho');
+    }
+  }, [safePlayableUrl, showToast]);
+
   // Failover watchdog: if the current route hangs with readyState === 0,
   // auto-advance to the next route. On Vercel the direct routes are the only
   // ones that can work and BDIX servers often need 10-20s to deliver the
@@ -1160,15 +1175,25 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
                     <span>Copy Stream Link</span>
                   </button>
 
-                  <a
-                    href={safePlayableUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="py-2 px-3 bg-white/10 hover:bg-white/15 text-white rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 transition-colors text-center"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open in VLC</span>
-                  </a>
+                  {!isVercel ? (
+                    <button
+                      onClick={openInVlcApp}
+                      className="py-2 px-3 bg-[#f70] hover:bg-[#ff8c1a] text-black rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <PlayCircle className="w-3.5 h-3.5" />
+                      <span>Play in VLC</span>
+                    </button>
+                  ) : (
+                    <a
+                      href={safePlayableUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="py-2 px-3 bg-white/10 hover:bg-white/15 text-white rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 transition-colors text-center"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Open in VLC</span>
+                    </a>
+                  )}
                 </div>
               </div>
             </div>
@@ -1305,6 +1330,18 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
                 : 'Remux Route'}
             </span>
           </button>
+
+          {/* Play in VLC (PC app mode — server launches VLC on the PC) */}
+          {!isVercel && (
+            <button
+              onClick={openInVlcApp}
+              className="px-2.5 py-1.5 rounded-lg bg-[#f70] hover:bg-[#ff8c1a] text-black text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="PC te VLC player e khulo — sob format cholbe"
+            >
+              <PlayCircle className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Play in VLC</span>
+            </button>
+          )}
 
           {/* Copy Stream Link */}
           <button

@@ -64,5 +64,7 @@ echo.
 echo Ei window ta KHOLA rakhba - bondho korle site bondho hoye jabe.
 echo Windows Firewall jodi jante chay, "Allow" dio.
 echo.
+echo App window ekai khule jabe koyek second er moddhe...
+start "" /min cmd /c "timeout /t 12 >nul & start msedge --app=http://localhost:3000"
 call npx tsx server.ts
 pause
