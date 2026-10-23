@@ -105,15 +105,19 @@ function saveMetaCache() {
 let isLocalBridgeAvailable = false;
 
 export async function checkLocalBridge(): Promise<boolean> {
-  try {
-    const res = await fetch(`${LOCAL_BRIDGE_BASE}/health`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (res.ok) {
-      isLocalBridgeAvailable = true;
-      return true;
-    }
-  } catch {}
+  // Try both loopback spellings — some browsers treat them differently for
+  // local-network access permissions.
+  for (const base of [LOCAL_BRIDGE_BASE, 'http://localhost:7788']) {
+    try {
+      const res = await fetch(`${base}/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) {
+        isLocalBridgeAvailable = true;
+        return true;
+      }
+    } catch {}
+  }
   isLocalBridgeAvailable = false;
   return false;
 }

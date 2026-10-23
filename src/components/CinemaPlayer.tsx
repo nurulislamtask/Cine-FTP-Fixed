@@ -219,6 +219,11 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   // the viewer's PC can reach private BDIX servers (172.16.50.7 etc.) that
   // neither Vercel nor the browser page may contact directly.
   const [bridgeAvailable, setBridgeAvailable] = useState(false);
+  // Manual override: the health probe can be blocked by the browser's
+  // local-network permission even while the bridge is running fine. The
+  // "Use PC Bridge" button forces the bridge route without the probe.
+  const [forceBridge, setForceBridge] = useState(false);
+  const bridgeOn = bridgeAvailable || forceBridge;
   useEffect(() => {
     let cancelled = false;
     const probe = async () => {
@@ -366,12 +371,12 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   // which is exactly the route that times out.
   const bridgeTargetUrl = isPrivateOrBdixUrl(rawVideoUrl) ? rawVideoUrl : safePlayableUrl;
   const bridgeStreamUrl = useMemo(() => {
-    if (!bridgeAvailable) return null;
+    if (!bridgeOn) return null;
     if (!isBrowserNativeFile) {
       return `http://127.0.0.1:7788/transcode?url=${encodeURIComponent(bridgeTargetUrl)}&audioTrack=${selectedAudioTrack}`;
     }
     return `http://127.0.0.1:7788/stream?url=${encodeURIComponent(bridgeTargetUrl)}`;
-  }, [bridgeAvailable, bridgeTargetUrl, isBrowserNativeFile, selectedAudioTrack]);
+  }, [bridgeOn, bridgeTargetUrl, isBrowserNativeFile, selectedAudioTrack]);
 
   const streamUrl = useMemo(() => {
     if (isResolvingFolder || (isTargetFolder && !overrideVideoUrl)) {
@@ -1094,7 +1099,7 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
                     ? 'This file is MKV/HEVC — web browsers cannot play it directly, and Vercel has no ffmpeg to convert it. It plays in AI Studio because that server has ffmpeg. Host the app on Cloud Run / a VPS (see the included Dockerfile), or open this file in VLC / MX Player.'
                     : 'The upstream FTP / BDIX server is slow or not directly routable on your current ISP connection.'}
                 </p>
-                {isVercel && !bridgeAvailable && (
+                {isVercel && !bridgeOn && (
                   <p className="text-[11px] text-amber-300/90 max-w-sm mx-auto leading-relaxed">
                     Tip: BDIX servers (172.16.50.7 etc.) only answer PCs on a BDIX
                     connection. Start the free PC Bridge — Settings → “Download
@@ -1230,6 +1235,34 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
         {/* Right Top Stream Controls & Playlist Drawer */}
         <div className="flex items-center gap-2 shrink-0">
+          {/* PC Bridge toggle (Vercel): stream through the bridge app running
+              on the viewer's own PC — the only route that reaches BDIX
+              private servers like 172.16.50.7 */}
+          {isVercel && (
+            <button
+              onClick={() => {
+                setForceBridge((f) => !f);
+                setStreamFallbackStep(0);
+                setStreamLoadFailed(false);
+                setIsBuffering(true);
+                showToast(
+                  !bridgeOn
+                    ? 'PC Bridge route on — streaming via your PC...'
+                    : 'PC Bridge route off'
+                );
+              }}
+              className={`px-2.5 py-1.5 rounded-lg text-white text-xs font-mono flex items-center gap-1.5 transition-colors cursor-pointer ${
+                bridgeOn
+                  ? 'bg-emerald-600/80 hover:bg-emerald-600'
+                  : 'bg-white/10 hover:bg-white/20'
+              }`}
+              title="Stream through the CineFTP bridge running on your PC (127.0.0.1:7788)"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">{bridgeOn ? 'Bridge On' : 'Use PC Bridge'}</span>
+            </button>
+          )}
+
           {/* Stream Route Switcher */}
           <button
             onClick={advanceStreamFallback}
