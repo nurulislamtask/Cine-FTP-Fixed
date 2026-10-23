@@ -60,6 +60,18 @@ Vercel e sudhu browser-native file-i play hobe: `.mp4` / `.webm`
 vabei browser e play hobe na — karon convert korar ffmpeg tai nai.
 Player ekhon ei khetre karon ta porishkar kore bole dibe.
 
+**Vercel-mode player fix (24 Oct):** Live test e dekha geche Vercel er
+server (Singapore region) theke ftpbd server e connect-i hoy na
+(`connect ETIMEDOUT 103.58.73.9:443`) — tai `/api/stream` proxy route
+Vercel e kaj kore na. Age player matro 4 second direct try korei oi
+dead proxy route e chole jeto, tai play atke thakto. Ekhon Vercel
+detect hole player: (1) direct stream ke 20 second somoy dey,
+(2) tarpor direct mirror server try kore, (3) ekbar proxy try kore,
+(4) seshe abar direct retry kore. Mane Vercel e video cholbe viewer
+er nijer (Bangladesh) connection diye sorasori FTP server theke —
+jeta ageo cholto. Non-Vercel host e (Docker/Cloud Run) ager
+proxy/transcode behaviour-i ache.
+
 ## Verify
 - `npm run build` ✓ pass
 - `npx tsc --noEmit` ✓ pass

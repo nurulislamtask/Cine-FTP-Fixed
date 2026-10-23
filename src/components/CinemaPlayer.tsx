@@ -212,12 +212,16 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   // Whether the backend can transcode/remux with ffmpeg (true locally and in
   // AI Studio / Cloud Run, FALSE on Vercel serverless where no ffmpeg exists).
   const [serverCanTranscode, setServerCanTranscode] = useState<boolean | null>(null);
+  const [serverIsVercel, setServerIsVercel] = useState(false);
   useEffect(() => {
     let cancelled = false;
     fetch('/api/capabilities')
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (!cancelled && d) setServerCanTranscode(Boolean(d.ffmpegAvailable));
+        if (!cancelled && d) {
+          setServerCanTranscode(Boolean(d.ffmpegAvailable));
+          setServerIsVercel(Boolean(d.isVercel));
+        }
       })
       .catch(() => {
         if (!cancelled) setServerCanTranscode(false);
@@ -300,7 +304,7 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
   const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const isDirectHttps = safePlayableUrl.startsWith('https://');
-  const isVercel = isVercelHost();
+  const isVercel = isVercelHost() || serverIsVercel;
 
   const alternateMirrorUrl = useMemo(() => {
     if (safePlayableUrl.includes('server2.ftpbd.net')) {
@@ -343,6 +347,33 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
     const isHttpOnHttps = isHttpsOrigin && safePlayableUrl.startsWith('http://') && !safePlayableUrl.startsWith('https://');
 
+    // VERCEL MODE — the server-side routes cannot work here: Vercel's
+    // datacenter IPs cannot reach BDIX/FTP servers at all (connect ETIMEDOUT)
+    // and there is no ffmpeg for transcoding. The ONLY route that can play is
+    // the viewer's own connection straight to the source (the viewer is in
+    // Bangladesh, the source is a BDIX server). So on Vercel: try direct,
+    // then the direct mirror, then ONE proxy attempt (still useful for
+    // non-BDIX public hosts), then retry direct — and never burn the working
+    // direct route on a 4-second timer (see the watchdog below).
+    if (isVercel) {
+      if (isHttpOnHttps) {
+        return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
+      }
+      if (streamFallbackStep === 0) {
+        return safePlayableUrl;
+      }
+      if (streamFallbackStep === 1) {
+        if (alternateMirrorUrl && alternateMirrorUrl.startsWith('https://')) {
+          return alternateMirrorUrl;
+        }
+        return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
+      }
+      if (streamFallbackStep === 2) {
+        return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
+      }
+      return safePlayableUrl;
+    }
+
     // Step 0: Direct stream (fastest native route)
     if (streamFallbackStep === 0 && !isHttpOnHttps) {
       return safePlayableUrl;
@@ -368,18 +399,18 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
     // Step 4: Transcode / Remux stream
     return `/api/transcode?url=${encodeURIComponent(safePlayableUrl)}&audioTrack=${selectedAudioTrack}`;
-  }, [safePlayableUrl, alternateMirrorUrl, streamFallbackStep, isResolvingFolder, isTargetFolder, overrideVideoUrl, isHttpsOrigin, selectedAudioTrack, isBrowserNativeFile, serverCanTranscode]);
+  }, [safePlayableUrl, alternateMirrorUrl, streamFallbackStep, isResolvingFolder, isTargetFolder, overrideVideoUrl, isHttpsOrigin, selectedAudioTrack, isBrowserNativeFile, serverCanTranscode, isVercel]);
 
   const fallbackAttemptsRef = useRef(0);
 
   // Toggle between direct stream, proxy route, and mirror smoothly
   const advanceStreamFallback = useCallback(() => {
     setStreamFallbackStep((prev) => {
-      const maxSteps = alternateMirrorUrl ? 4 : 2;
+      const maxSteps = isVercel ? 3 : alternateMirrorUrl ? 4 : 2;
       return (prev + 1) % (maxSteps + 1);
     });
     setIsBuffering(true);
-  }, [alternateMirrorUrl]);
+  }, [alternateMirrorUrl, isVercel]);
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -388,22 +419,34 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     window.setTimeout(() => setToastMessage(null), 3500);
   }, []);
 
-  // Fast failover watchdog: If direct stream hangs with readyState === 0 after 4s, auto-advance to proxy!
+  // Failover watchdog: if the current route hangs with readyState === 0,
+  // auto-advance to the next route. On Vercel the direct routes are the only
+  // ones that can work and BDIX servers often need 10-20s to deliver the
+  // first bytes of a large file — a 4s cutoff killed working streams and
+  // threw the viewer onto the dead proxy route — so Vercel waits 20s and
+  // also watches the direct-mirror step. Other hosts keep the fast 4s cut.
   useEffect(() => {
     if (!isPlaying && !isBuffering) return;
     if (streamLoadFailed || !streamUrl) return;
 
+    const stallMs = isVercel ? 20000 : 4000;
+    const onWatchedStep = isVercel
+      ? streamFallbackStep === 0 || streamFallbackStep === 1
+      : streamFallbackStep === 0;
+
     const timer = window.setTimeout(() => {
       const v = videoRef.current;
-      if (v && v.readyState === 0 && isBuffering && streamFallbackStep === 0) {
-        console.warn('Direct stream connection slow/unreachable, advancing to proxy...');
+      if (v && v.readyState === 0 && isBuffering && onWatchedStep) {
+        console.warn('Stream connection slow/unreachable, advancing to next route...');
         advanceStreamFallback();
-        showToast('Connecting via high-speed stream proxy...');
+        showToast(
+          isVercel ? 'Trying another route...' : 'Connecting via high-speed stream proxy...'
+        );
       }
-    }, 4000);
+    }, stallMs);
 
     return () => window.clearTimeout(timer);
-  }, [streamUrl, streamFallbackStep, isBuffering, isPlaying, streamLoadFailed, advanceStreamFallback, showToast]);
+  }, [streamUrl, streamFallbackStep, isBuffering, isPlaying, streamLoadFailed, advanceStreamFallback, showToast, isVercel]);
 
 
   // Autoplay handler with audio policy fallback
@@ -859,15 +902,20 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
             }
           }}
           onError={() => {
-            const maxAttempts = alternateMirrorUrl ? 4 : 3;
+            const maxAttempts = isVercel ? 3 : alternateMirrorUrl ? 4 : 3;
             if (fallbackAttemptsRef.current < maxAttempts) {
               fallbackAttemptsRef.current += 1;
               const cur = videoRef.current?.currentTime || currentTime;
               advanceStreamFallback();
               setStreamLoadFailed(false);
               const nextStep = (streamFallbackStep + 1) % (maxAttempts + 1);
-              const stepName =
-                nextStep === 1
+              const stepName = isVercel
+                ? nextStep === 1
+                  ? 'Trying backup mirror stream...'
+                  : nextStep === 2
+                  ? 'Switching to Stream Proxy...'
+                  : 'Retrying direct stream...'
+                : nextStep === 1
                   ? 'Switching to Stream Proxy...'
                   : nextStep === 2
                   ? 'Trying backup mirror stream...'
@@ -941,11 +989,17 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
               {streamFallbackStep === 0
                 ? 'Connecting direct stream...'
                 : streamFallbackStep === 1
-                ? 'Loading proxy stream...'
+                ? isVercel
+                  ? 'Connecting backup mirror...'
+                  : 'Loading proxy stream...'
                 : streamFallbackStep === 2
-                ? 'Connecting backup mirror...'
+                ? isVercel
+                  ? 'Loading proxy stream...'
+                  : 'Connecting backup mirror...'
                 : streamFallbackStep === 3
-                ? 'Loading backup proxy...'
+                ? isVercel
+                  ? 'Retrying direct stream...'
+                  : 'Loading backup proxy...'
                 : 'Remuxing video stream...'}
             </span>
           </div>
@@ -1106,11 +1160,17 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
               {streamFallbackStep === 0
                 ? 'Direct Route'
                 : streamFallbackStep === 1
-                ? 'Proxy Route'
+                ? isVercel
+                  ? 'Mirror Direct'
+                  : 'Proxy Route'
                 : streamFallbackStep === 2
-                ? 'Mirror Direct'
+                ? isVercel
+                  ? 'Proxy Route'
+                  : 'Mirror Direct'
                 : streamFallbackStep === 3
-                ? 'Mirror Proxy'
+                ? isVercel
+                  ? 'Direct Retry'
+                  : 'Mirror Proxy'
                 : 'Remux Route'}
             </span>
           </button>
