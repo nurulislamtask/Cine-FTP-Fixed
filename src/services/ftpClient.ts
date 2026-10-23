@@ -1010,7 +1010,15 @@ export async function resolvePlayableFromFolder(folderItem: ParsedFtpItem): Prom
   const targetNorm = normStr(folderItem.cleanTitle);
   const rawNorm = normStr(folderItem.rawName);
 
-  const seedMatch = INITIAL_UNIFIED_CATALOG.find((s) => {
+  // Seed entries point at public ftpbd URLs. For a folder that lives on a
+  // private BDIX server, the seed shortcut is only safe on Vercel (where the
+  // private address is unreachable anyway). On a local/PC deployment the
+  // real folder must be scanned — its original private URLs are the ones
+  // that play.
+  const allowSeedShortcut = isVercelHost() || !isPrivateOrBdixUrl(folderItem.url);
+  const seedMatch = !allowSeedShortcut
+    ? undefined
+    : INITIAL_UNIFIED_CATALOG.find((s) => {
     if (s.id === folderItem.id || s.url === folderItem.url) return true;
     const sNorm = normStr(s.cleanTitle);
     if (

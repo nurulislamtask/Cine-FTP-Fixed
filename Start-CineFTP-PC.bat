@@ -18,11 +18,9 @@ if not exist node_modules (
   echo Prothom bar: package install hocche, 2-3 minute lagte pare...
   call npm install --legacy-peer-deps
 )
-if not exist dist (
-  echo.
-  echo Site build hocche...
-  call npm run build
-)
+echo.
+echo Site build hocche (notun version thakle setai ashbe)...
+call npm run build
 set PORT=3000
 set NODE_ENV=production
 echo.

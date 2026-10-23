@@ -763,6 +763,14 @@ function convertSrtToVtt(srtContent: string, offsetSeconds = 0): string {
 
 export const app = express();
 
+// True only on Vercel serverless. The BDIX gateway rewrite (private
+// 172.16.50.7-style addresses -> public ftpbd mirrors) exists solely because
+// Vercel can never reach private BDIX addresses. Anywhere else (the user's
+// own PC server, Docker, Cloud Run) the ORIGINAL private address is the one
+// that actually answers — rewriting it to ftpbd breaks playback whenever
+// the ftpbd route is down, so off-Vercel the original URL is used as-is.
+const IS_VERCEL_ENV = Boolean(process.env.VERCEL || process.env.NOW_REGION);
+
 // Detect once whether ffmpeg & ffprobe binaries exist in this runtime (true on Cloud Run / Docker / Local, false on Vercel Serverless)
 const HAS_FFMPEG = (() => {
   try {
@@ -1591,7 +1599,7 @@ app.get(['/api/browse', '/browse'], async (req, res) => {
       return;
     }
 
-    const gatewayUrl = resolvePublicBdixGatewayUrl(normalizedUrl);
+    const gatewayUrl = IS_VERCEL_ENV ? resolvePublicBdixGatewayUrl(normalizedUrl) : null;
     if (gatewayUrl === 'PORTAL_ROOT') {
       const portalHtml = buildBdixPortalRootHtml();
       const result = parseDirectoryHtml(portalHtml, normalizedUrl, 'bdix-cloud-gateway');
@@ -1644,7 +1652,7 @@ app.get(['/api/browse', '/browse'], async (req, res) => {
     }
 
     const { text, finalUrl } = await fetchUrlText(effectiveTargetUrl, {
-      timeoutMs: isPrivateIp && !gatewayUrl ? 2000 : 9000,
+      timeoutMs: isPrivateIp && !gatewayUrl && IS_VERCEL_ENV ? 2000 : 9000,
     });
     const result = parseDirectoryHtml(text, finalUrl, effectiveVia);
     if (gatewayUrl) {
@@ -1924,9 +1932,11 @@ async function handleRangeStreamProxy(
   videoUrl: string
 ) {
   let targetUrl = videoUrl;
-  const gatewayResolved = resolvePublicBdixGatewayUrl(videoUrl);
-  if (gatewayResolved && gatewayResolved !== 'PORTAL_ROOT') {
-    targetUrl = gatewayResolved;
+  if (IS_VERCEL_ENV) {
+    const gatewayResolved = resolvePublicBdixGatewayUrl(videoUrl);
+    if (gatewayResolved && gatewayResolved !== 'PORTAL_ROOT') {
+      targetUrl = gatewayResolved;
+    }
   }
 
   // Upgrade known public FTP mirrors to HTTPS to prevent mixed content issues

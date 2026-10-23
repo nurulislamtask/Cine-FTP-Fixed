@@ -323,15 +323,22 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     if (u.startsWith('http://server') && u.includes('.ftpbd.net')) {
       u = u.replace(/^http:\/\//i, 'https://');
     }
-    // If it's a private BDIX IP or DhakaFlix server, resolve to public HTTPS gateway
-    if (/^(http:\/\/)?(172\.(1[6-9]|2\d|3[0-1])\.|10\.|192\.168\.)/i.test(u) || u.includes('dhakaflix') || u.includes('discoveryftp')) {
+    // Private BDIX IPs (172.16.50.7 etc.) are rewritten to the public ftpbd
+    // gateway ONLY on Vercel, where nothing can reach a private address.
+    // On a local/PC deployment the original private address is the reachable
+    // one — rewriting it to ftpbd breaks playback when that route is down.
+    const onVercel = isVercelHost() || serverIsVercel;
+    if (
+      onVercel &&
+      (/^(http:\/\/)?(172\.(1[6-9]|2\d|3[0-1])\.|10\.|192\.168\.)/i.test(u) || u.includes('dhakaflix') || u.includes('discoveryftp'))
+    ) {
       const publicGw = resolvePublicBdixGatewayUrl(u);
       if (publicGw && publicGw !== 'PORTAL_ROOT') {
         u = publicGw;
       }
     }
     return u;
-  }, [rawVideoUrl]);
+  }, [rawVideoUrl, serverIsVercel]);
 
   const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const isDirectHttps = safePlayableUrl.startsWith('https://');
