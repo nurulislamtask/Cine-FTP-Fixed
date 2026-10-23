@@ -1926,6 +1926,72 @@ const sharedHttpAgent = new http.Agent({
  * so browsers receive 206 Partial Content instantly (~300ms) without stalling or buffering multi-GB files.
  * Works seamlessly on Vercel Serverless (< 4.5 MB limit), Google Cloud Run, and Node.js dev server.
  */
+/**
+ * Off-Vercel only: the site's seed/featured titles point at public ftpbd
+ * mirrors (e.g. server2.ftpbd.net/FTP-2/English Movies/...). Those mirrors
+ * carry the DhakaFlix BDIX pool — the same content lives on the private
+ * portal 172.16.50.7 under the same category path (minus the /FTP-N
+ * prefix). When the ftpbd route is dead but THIS server sits on a BDIX
+ * connection (the user's own PC), the private original is the one that
+ * answers. Resolve an ftpbd URL to its reachable private twin: exact file
+ * first, then a folder scan (filenames can differ, e.g. an .mkv original
+ * vs the _reencoded.mp4 mirror).
+ */
+const localMirrorCache = new Map<string, { url: string | null; expiresAt: number }>();
+
+async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> {
+  if (IS_VERCEL_ENV) return null;
+  let u: URL;
+  try {
+    u = new URL(videoUrl);
+  } catch {
+    return null;
+  }
+  if (!/\.ftpbd\.net$/i.test(u.hostname)) return null;
+  const m = u.pathname.match(/^\/FTP-\d+(\/.*)$/);
+  if (!m) return null;
+
+  const cached = localMirrorCache.get(videoUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+  const candidate = `http://172.16.50.7${m[1]}`;
+  let resolved: string | null = null;
+  try {
+    const probe = await fetch(candidate, {
+      headers: { Range: 'bytes=0-0', 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (probe.status === 200 || probe.status === 206) resolved = candidate;
+    try {
+      await probe.body?.cancel();
+    } catch {}
+  } catch {}
+
+  if (!resolved) {
+    try {
+      const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
+      const { text, finalUrl } = await fetchUrlText(folderUrl, { timeoutMs: 6000 });
+      const listing = parseDirectoryHtml(text, finalUrl, 'backend');
+      const videos = listing.items.filter(
+        (i) => !i.isDirectory && /\.(mp4|mkv|webm|m4v|avi|ts)$/i.test(i.url)
+      );
+      videos.sort((a, b) => {
+        const aMp4 = /\.mp4(\?|$)/i.test(a.url) ? 1 : 0;
+        const bMp4 = /\.mp4(\?|$)/i.test(b.url) ? 1 : 0;
+        if (aMp4 !== bMp4) return bMp4 - aMp4;
+        return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+      });
+      if (videos.length > 0) resolved = videos[0].url;
+    } catch {}
+  }
+
+  localMirrorCache.set(videoUrl, {
+    url: resolved,
+    expiresAt: Date.now() + (resolved ? 10 * 60 * 1000 : 60 * 1000),
+  });
+  return resolved;
+}
+
 async function handleRangeStreamProxy(
   req: express.Request,
   res: express.Response,
@@ -1942,6 +2008,13 @@ async function handleRangeStreamProxy(
   // Upgrade known public FTP mirrors to HTTPS to prevent mixed content issues
   if (targetUrl.startsWith('http://server') && targetUrl.includes('.ftpbd.net')) {
     targetUrl = targetUrl.replace(/^http:\/\//i, 'https://');
+  }
+
+  // Off-Vercel (user's own PC): if this is an ftpbd mirror URL, swap it for
+  // the reachable private DhakaFlix original before streaming.
+  if (!IS_VERCEL_ENV) {
+    const localMirror = await resolveLocalBdixMirror(targetUrl);
+    if (localMirror) targetUrl = localMirror;
   }
 
   let parsed: URL;
@@ -2427,7 +2500,7 @@ app.get(['/api/stream', '/stream'], (req, res) => {
  * API: Real-Time FFmpeg Multi-Audio Track Switcher & MKV/10-bit-to-MP4 Stream Remuxer
  * Automatically falls back to HTTP Range Stream Proxy on Vercel Serverless if ffmpeg is not installed.
  */
-app.get(['/api/transcode', '/transcode'], (req, res) => {
+app.get(['/api/transcode', '/transcode'], async (req, res) => {
   const videoUrl = String(req.query.url || '').trim();
   const audioTrack = Math.max(0, parseInt(String(req.query.audioTrack || '0'), 10) || 0);
   const startSeconds = Math.max(0, parseFloat(String(req.query.start || '0')) || 0);
@@ -2439,7 +2512,7 @@ app.get(['/api/transcode', '/transcode'], (req, res) => {
     return;
   }
 
-  const targetUrl = videoUrl;
+  const targetUrl = (await resolveLocalBdixMirror(videoUrl)) || videoUrl;
 
   // On Vercel Serverless (where ffmpeg binary is absent), fall back seamlessly to Range Stream Proxy
   if (!HAS_FFMPEG) {
