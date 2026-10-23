@@ -376,7 +376,10 @@ export function clearIndexedCache() {
   } catch {}
 }
 
-const PLAYABLE_CACHE_KEY = 'cineftp_playable_links_cache_v2';
+// v3: v2 entries could pin a private-BDIX title to a dead ftpbd gateway URL
+// (cached while the gateway rewrite was still active off-Vercel). Bumping
+// the key discards those poisoned entries everywhere.
+const PLAYABLE_CACHE_KEY = 'cineftp_playable_links_cache_v3';
 const playableLinksCache = new Map<string, string>();
 
 try {
