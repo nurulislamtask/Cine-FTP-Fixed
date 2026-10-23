@@ -27,7 +27,7 @@ import {
   Download,
   Film,
 } from 'lucide-react';
-import { ParsedFtpItem, convertSrtToVtt, resolvePublicBdixGatewayUrl } from '../utils/ftpParser';
+import { ParsedFtpItem, convertSrtToVtt, resolvePublicBdixGatewayUrl, isPrivateOrBdixUrl } from '../utils/ftpParser';
 import {
   probeVideoStreams,
   ProbedAudioTrack,
@@ -37,6 +37,7 @@ import {
   getCachedPlayableUrl,
   saveCachedPlayableUrl,
   isVercelHost,
+  checkLocalBridge,
 } from '../services/ftpClient';
 
 interface CinemaPlayerProps {
@@ -213,6 +214,31 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   // AI Studio / Cloud Run, FALSE on Vercel serverless where no ffmpeg exists).
   const [serverCanTranscode, setServerCanTranscode] = useState<boolean | null>(null);
   const [serverIsVercel, setServerIsVercel] = useState(false);
+  // Local PC bridge (the bdix-bridge .bat running on the viewer's own PC at
+  // 127.0.0.1:7788). It is the designed BDIX gateway for hosted deployments:
+  // the viewer's PC can reach private BDIX servers (172.16.50.7 etc.) that
+  // neither Vercel nor the browser page may contact directly.
+  const [bridgeAvailable, setBridgeAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      const ok = await checkLocalBridge();
+      if (!cancelled) setBridgeAvailable(ok);
+    };
+    probe();
+    const iv = window.setInterval(probe, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+    };
+  }, []);
+  // When the bridge comes up mid-session, jump straight to the bridge route.
+  useEffect(() => {
+    if (bridgeAvailable) {
+      setStreamFallbackStep(0);
+      setStreamLoadFailed(false);
+    }
+  }, [bridgeAvailable]);
   useEffect(() => {
     let cancelled = false;
     fetch('/api/capabilities')
@@ -334,6 +360,19 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     return /\.(mp4|m4v|webm|mov)$/.test(clean);
   }, [safePlayableUrl]);
 
+  // Stream URL served by the viewer's own PC bridge, when it is running.
+  // For private BDIX sources the bridge must fetch the ORIGINAL private URL
+  // (e.g. http://172.16.50.7/...) — not the public ftpbd gateway rewrite,
+  // which is exactly the route that times out.
+  const bridgeTargetUrl = isPrivateOrBdixUrl(rawVideoUrl) ? rawVideoUrl : safePlayableUrl;
+  const bridgeStreamUrl = useMemo(() => {
+    if (!bridgeAvailable) return null;
+    if (!isBrowserNativeFile) {
+      return `http://127.0.0.1:7788/transcode?url=${encodeURIComponent(bridgeTargetUrl)}&audioTrack=${selectedAudioTrack}`;
+    }
+    return `http://127.0.0.1:7788/stream?url=${encodeURIComponent(bridgeTargetUrl)}`;
+  }, [bridgeAvailable, bridgeTargetUrl, isBrowserNativeFile, selectedAudioTrack]);
+
   const streamUrl = useMemo(() => {
     if (isResolvingFolder || (isTargetFolder && !overrideVideoUrl)) {
       return '';
@@ -356,6 +395,30 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     // non-BDIX public hosts), then retry direct — and never burn the working
     // direct route on a 4-second timer (see the watchdog below).
     if (isVercel) {
+      // BEST ROUTE — the viewer's own PC bridge: it fetches from the BDIX
+      // server over the viewer's connection (the only connection that can
+      // reach 172.16.50.7 & friends) and re-streams to this page over
+      // loopback. Non-native files go through the bridge's ffmpeg remuxer.
+      if (bridgeStreamUrl) {
+        if (streamFallbackStep === 0) {
+          return bridgeStreamUrl;
+        }
+        if (streamFallbackStep === 1) {
+          return isHttpOnHttps
+            ? `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`
+            : safePlayableUrl;
+        }
+        if (streamFallbackStep === 2) {
+          if (alternateMirrorUrl && alternateMirrorUrl.startsWith('https://')) {
+            return alternateMirrorUrl;
+          }
+          return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
+        }
+        if (streamFallbackStep === 3) {
+          return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
+        }
+        return safePlayableUrl;
+      }
       if (isHttpOnHttps) {
         return `/api/stream?url=${encodeURIComponent(safePlayableUrl)}`;
       }
@@ -399,18 +462,18 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
     // Step 4: Transcode / Remux stream
     return `/api/transcode?url=${encodeURIComponent(safePlayableUrl)}&audioTrack=${selectedAudioTrack}`;
-  }, [safePlayableUrl, alternateMirrorUrl, streamFallbackStep, isResolvingFolder, isTargetFolder, overrideVideoUrl, isHttpsOrigin, selectedAudioTrack, isBrowserNativeFile, serverCanTranscode, isVercel]);
+  }, [safePlayableUrl, alternateMirrorUrl, streamFallbackStep, isResolvingFolder, isTargetFolder, overrideVideoUrl, isHttpsOrigin, selectedAudioTrack, isBrowserNativeFile, serverCanTranscode, isVercel, bridgeStreamUrl]);
 
   const fallbackAttemptsRef = useRef(0);
 
   // Toggle between direct stream, proxy route, and mirror smoothly
   const advanceStreamFallback = useCallback(() => {
     setStreamFallbackStep((prev) => {
-      const maxSteps = isVercel ? 3 : alternateMirrorUrl ? 4 : 2;
+      const maxSteps = isVercel ? (bridgeStreamUrl ? 4 : 3) : alternateMirrorUrl ? 4 : 2;
       return (prev + 1) % (maxSteps + 1);
     });
     setIsBuffering(true);
-  }, [alternateMirrorUrl, isVercel]);
+  }, [alternateMirrorUrl, isVercel, bridgeStreamUrl]);
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -431,7 +494,7 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
     const stallMs = isVercel ? 20000 : 4000;
     const onWatchedStep = isVercel
-      ? streamFallbackStep === 0 || streamFallbackStep === 1
+      ? streamFallbackStep <= (bridgeStreamUrl ? 2 : 1)
       : streamFallbackStep === 0;
 
     const timer = window.setTimeout(() => {
@@ -446,7 +509,7 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     }, stallMs);
 
     return () => window.clearTimeout(timer);
-  }, [streamUrl, streamFallbackStep, isBuffering, isPlaying, streamLoadFailed, advanceStreamFallback, showToast, isVercel]);
+  }, [streamUrl, streamFallbackStep, isBuffering, isPlaying, streamLoadFailed, advanceStreamFallback, showToast, isVercel, bridgeStreamUrl]);
 
 
   // Autoplay handler with audio policy fallback
@@ -902,7 +965,7 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
             }
           }}
           onError={() => {
-            const maxAttempts = isVercel ? 3 : alternateMirrorUrl ? 4 : 3;
+            const maxAttempts = isVercel ? (bridgeStreamUrl ? 4 : 3) : alternateMirrorUrl ? 4 : 3;
             if (fallbackAttemptsRef.current < maxAttempts) {
               fallbackAttemptsRef.current += 1;
               const cur = videoRef.current?.currentTime || currentTime;
@@ -987,19 +1050,29 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
             <div className="w-12 h-12 border-3 border-[#E5A00D] border-t-transparent rounded-full animate-spin shadow-lg" />
             <span className="text-xs font-semibold text-white/90 bg-black/70 px-4 py-1.5 rounded-full backdrop-blur-md border border-white/10 select-none shadow">
               {streamFallbackStep === 0
-                ? 'Connecting direct stream...'
+                ? bridgeStreamUrl
+                  ? 'Connecting via your PC bridge...'
+                  : 'Connecting direct stream...'
                 : streamFallbackStep === 1
                 ? isVercel
-                  ? 'Connecting backup mirror...'
+                  ? bridgeStreamUrl
+                    ? 'Connecting direct stream...'
+                    : 'Connecting backup mirror...'
                   : 'Loading proxy stream...'
                 : streamFallbackStep === 2
                 ? isVercel
-                  ? 'Loading proxy stream...'
+                  ? bridgeStreamUrl
+                    ? 'Connecting backup mirror...'
+                    : 'Loading proxy stream...'
                   : 'Connecting backup mirror...'
                 : streamFallbackStep === 3
                 ? isVercel
-                  ? 'Retrying direct stream...'
+                  ? bridgeStreamUrl
+                    ? 'Loading proxy stream...'
+                    : 'Retrying direct stream...'
                   : 'Loading backup proxy...'
+                : isVercel && bridgeStreamUrl
+                ? 'Retrying direct stream...'
                 : 'Remuxing video stream...'}
             </span>
           </div>
@@ -1021,6 +1094,14 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
                     ? 'This file is MKV/HEVC — web browsers cannot play it directly, and Vercel has no ffmpeg to convert it. It plays in AI Studio because that server has ffmpeg. Host the app on Cloud Run / a VPS (see the included Dockerfile), or open this file in VLC / MX Player.'
                     : 'The upstream FTP / BDIX server is slow or not directly routable on your current ISP connection.'}
                 </p>
+                {isVercel && !bridgeAvailable && (
+                  <p className="text-[11px] text-amber-300/90 max-w-sm mx-auto leading-relaxed">
+                    Tip: BDIX servers (172.16.50.7 etc.) only answer PCs on a BDIX
+                    connection. Start the free PC Bridge — Settings → “Download
+                    Bridge .bat” (needs Node.js) — and keep its window open. This
+                    player then streams through your own PC automatically.
+                  </p>
+                )}
                 <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/5 border border-white/10 rounded-full text-[11px] text-zinc-400">
                   <span>Movie Length:</span>
                   <span className="text-white font-mono font-semibold">
@@ -1158,19 +1239,29 @@ export const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
             <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
             <span className="hidden sm:inline">
               {streamFallbackStep === 0
-                ? 'Direct Route'
+                ? bridgeStreamUrl
+                  ? 'PC Bridge'
+                  : 'Direct Route'
                 : streamFallbackStep === 1
                 ? isVercel
-                  ? 'Mirror Direct'
+                  ? bridgeStreamUrl
+                    ? 'Direct Route'
+                    : 'Mirror Direct'
                   : 'Proxy Route'
                 : streamFallbackStep === 2
                 ? isVercel
-                  ? 'Proxy Route'
+                  ? bridgeStreamUrl
+                    ? 'Mirror Direct'
+                    : 'Proxy Route'
                   : 'Mirror Direct'
                 : streamFallbackStep === 3
                 ? isVercel
-                  ? 'Direct Retry'
+                  ? bridgeStreamUrl
+                    ? 'Proxy Route'
+                    : 'Direct Retry'
                   : 'Mirror Proxy'
+                : isVercel && bridgeStreamUrl
+                ? 'Direct Retry'
                 : 'Remux Route'}
             </span>
           </button>
