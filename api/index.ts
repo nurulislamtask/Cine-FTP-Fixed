@@ -2672,6 +2672,86 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
 }
 
+// Seed/featured titles point at public ftpbd mirrors, which may be dead
+// from the viewer's ISP. The same content lives on the private DhakaFlix
+// portal 172.16.50.7 under the same path (minus the /FTP-N prefix).
+// Swap an ftpbd URL for its reachable private twin: exact file first,
+// then a folder scan (filenames can differ on the private server).
+const mirrorCache = {};
+function fetchText(u, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const c = u.startsWith('https') ? https : http;
+    const r = c.get(u, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (resp) => {
+      if ([301, 302, 303, 307, 308].includes(resp.statusCode) && resp.headers.location) {
+        fetchText(new URL(resp.headers.location, u).href, timeoutMs).then(resolve, reject);
+        return;
+      }
+      let d = '';
+      resp.on('data', (ch) => { d += ch; if (d.length > 2000000) r.destroy(); });
+      resp.on('end', () => resolve({ text: d, status: resp.statusCode }));
+    });
+    r.on('error', reject);
+    r.setTimeout(timeoutMs || 6000, () => { r.destroy(new Error('timeout')); });
+  });
+}
+function probeFile(u) {
+  return new Promise((resolve) => {
+    const c = u.startsWith('https') ? https : http;
+    const r = c.request(u, { method: 'GET', headers: { Range: 'bytes=0-0', 'User-Agent': 'Mozilla/5.0' } }, (resp) => {
+      const ok = resp.statusCode === 200 || resp.statusCode === 206;
+      resp.resume();
+      resolve(ok);
+    });
+    r.on('error', () => resolve(false));
+    r.setTimeout(5000, () => { r.destroy(); resolve(false); });
+    r.end();
+  });
+}
+function isVideoFile(u) {
+  const clean = u.split('?')[0].toLowerCase();
+  return ['.mp4', '.mkv', '.webm', '.m4v'].some((e) => clean.endsWith(e));
+}
+async function resolveMirror(target) {
+  try {
+    const u = new URL(target);
+    if (!u.hostname.toLowerCase().endsWith('.ftpbd.net')) return target;
+    let rest = null;
+    if (u.pathname.indexOf('/FTP-') === 0) {
+      const idx = u.pathname.indexOf('/', 1);
+      if (idx > 0) {
+        const seg = u.pathname.slice(1, idx);
+        const num = seg.slice(4);
+        const isNum = seg.indexOf('FTP-') === 0 && num.length > 0 && num.split('').every((ch) => ch >= '0' && ch <= '9');
+        if (isNum) rest = u.pathname.slice(idx);
+      }
+    }
+    if (!rest) return target;
+    if (mirrorCache[target]) return mirrorCache[target];
+    const candidate = 'http://172.16.50.7' + rest;
+    let resolved = null;
+    if (await probeFile(candidate)) resolved = candidate;
+    if (!resolved) {
+      try {
+        const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
+        const page = await fetchText(folderUrl, 6000);
+        const hrefs = [];
+        const re = /href="([^"]+)"/gi;
+        let mm;
+        while ((mm = re.exec(page.text)) !== null) {
+          try {
+            const abs = new URL(mm[1], folderUrl).href;
+            if (isVideoFile(abs)) hrefs.push(abs);
+          } catch {}
+        }
+        hrefs.sort((a, b) => (a.toLowerCase().includes('.mp4') ? 0 : 1) - (b.toLowerCase().includes('.mp4') ? 0 : 1));
+        if (hrefs.length) resolved = hrefs[0];
+      } catch {}
+    }
+    mirrorCache[target] = resolved || target;
+    return mirrorCache[target];
+  } catch { return target; }
+}
+
 const server = http.createServer(async (req, res) => {
   setCors(res);
   if (req.method === 'OPTIONS') {
@@ -2706,8 +2786,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqUrl.pathname === '/stream') {
-    const target = reqUrl.searchParams.get('url');
+    let target = reqUrl.searchParams.get('url');
     if (!target) { res.writeHead(400); res.end('Missing url'); return; }
+    target = await resolveMirror(target);
     let parsed;
     try { parsed = new URL(target); } catch { res.writeHead(400); res.end('Bad url'); return; }
     const client = parsed.protocol === 'https:' ? https : http;
@@ -2734,7 +2815,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqUrl.pathname === '/transcode') {
-    const target = reqUrl.searchParams.get('url');
+    let target = reqUrl.searchParams.get('url');
+    if (target) target = await resolveMirror(target);
     const audioTrack = parseInt(reqUrl.searchParams.get('audioTrack') || '0', 10) || 0;
     const start = parseFloat(reqUrl.searchParams.get('start') || '0') || 0;
     res.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' });

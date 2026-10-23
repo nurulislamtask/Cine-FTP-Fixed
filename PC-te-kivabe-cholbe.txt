@@ -1,0 +1,13 @@
+CineFTP — PC version
+====================
+1. Ei folder ta zip theke Extract All kore ber koro (zip er vitor theke chalabe na)
+2. Start-CineFTP-PC.bat double-click koro, window ta khola rakho
+3. Browser e jao: http://localhost:3000
+4. Phone theke dekhte chaile (ekoi WiFi): http://192.168.0.220:3000
+   (tomar PC er IP alada hole bat window tei lekha thakbe)
+
+Website version
+===============
+https://cinemaftp.vercel.app
+Bashay bose dekhte hole site er Settings theke "PC Bridge" download kore
+chalu rekhe site theke play koro — bridge tomar PC diye movie ene dey.
