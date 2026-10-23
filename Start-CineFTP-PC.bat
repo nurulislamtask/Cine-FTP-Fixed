@@ -47,6 +47,9 @@ if errorlevel 1 (
   pause
   exit /b
 )
+echo Purono CineFTP server chalu thakle bondho kore dicchi...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>nul
+timeout /t 1 >nul
 set PORT=3000
 set NODE_ENV=production
 echo.
@@ -65,6 +68,6 @@ echo Ei window ta KHOLA rakhba - bondho korle site bondho hoye jabe.
 echo Windows Firewall jodi jante chay, "Allow" dio.
 echo.
 echo App window ekai khule jabe koyek second er moddhe...
-start "" /min cmd /c "timeout /t 12 >nul & start msedge --app=http://localhost:3000"
+start "" /min cmd /c "timeout /t 12 >nul & (start "" chrome --app=http://localhost:3000 2>nul || start http://localhost:3000)"
 call npx tsx server.ts
 pause
