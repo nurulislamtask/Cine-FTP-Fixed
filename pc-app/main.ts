@@ -8,7 +8,7 @@
 import express from 'express';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, appendFileSync } from 'fs';
 import { app } from '../api/index';
 
 const PORT = 3000;
@@ -71,6 +71,35 @@ function openAppWindow(url: string) {
 }
 
 process.env.NODE_ENV = 'production';
+
+// If anything crashes at startup, do NOT let the console window vanish —
+// write the error to a log file next to the .exe and wait for a keypress,
+// so the user can see/send what went wrong.
+const exeDir = path.dirname(process.execPath);
+const errorLogPath = path.join(exeDir, 'CineFTP-error.log');
+function reportFatal(where: string, err: unknown) {
+  const msg = `[${new Date().toISOString()}] ${where}: ${
+    err instanceof Error ? err.stack || err.message : String(err)
+  }\n`;
+  try {
+    appendFileSync(errorLogPath, msg);
+  } catch {}
+  console.log('====================================================');
+  console.log('  CineFTP chalu hote parlo na!');
+  console.log('  Karon: ' + (err instanceof Error ? err.message : String(err)));
+  console.log('  CineFTP-error.log file ta amake pathale ami thik kore dibo.');
+  console.log('  Bondho korte Enter chap dao.');
+  console.log('====================================================');
+  try {
+    process.stdin.resume();
+    process.stdin.once('data', () => process.exit(1));
+  } catch {
+    process.exit(1);
+  }
+}
+process.on('uncaughtException', (err) => reportFatal('uncaughtException', err));
+process.on('unhandledRejection', (err) => reportFatal('unhandledRejection', err));
+
 freePort(PORT);
 
 // Serve the web UI. Inside the single-file .exe (Node SEA) the dist files
@@ -126,12 +155,25 @@ if (seaApi?.isSea?.()) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('====================================================');
-  console.log('  CineFTP App cholche!');
-  console.log(`  Ei PC te:  http://localhost:${PORT}`);
-  console.log('  Movie khule "Play in VLC" chaplei VLC te cholbe.');
-  console.log('  Ei window bondho korle app bondho hoye jabe.');
-  console.log('====================================================');
-  setTimeout(() => openAppWindow(`http://localhost:${PORT}`), 900);
-});
+// If port 3000 is still held by something unkillable, fall back to the
+// next free port instead of crashing (which used to flash-and-close).
+function startOnPort(port: number, attemptsLeft: number) {
+  const server = app.listen(port, '0.0.0.0', () => {
+    console.log('====================================================');
+    console.log('  CineFTP App cholche!');
+    console.log(`  Ei PC te:  http://localhost:${port}`);
+    console.log('  Movie khule "Play in VLC" chaplei VLC te cholbe.');
+    console.log('  Ei window bondho korle app bondho hoye jabe.');
+    console.log('====================================================');
+    setTimeout(() => openAppWindow(`http://localhost:${port}`), 900);
+  });
+  server.on('error', (err: any) => {
+    if (err?.code === 'EADDRINUSE' && attemptsLeft > 0) {
+      console.log(`Port ${port} dokhol ache — ${port + 1} e try korchi...`);
+      startOnPort(port + 1, attemptsLeft - 1);
+    } else {
+      reportFatal('listen', err);
+    }
+  });
+}
+startOnPort(PORT, 2);
