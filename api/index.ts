@@ -1940,74 +1940,137 @@ const sharedHttpAgent = new http.Agent({
  */
 const localMirrorCache = new Map<string, { url: string | null; expiresAt: number }>();
 
-async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> {
-  if (IS_VERCEL_ENV) return null;
+/**
+ * The REAL DhakaFlix source tree (supplied by the user, 2026-10-24).
+ * The earlier guess — bare http://172.16.50.7/<Category>/... — was wrong
+ * and 404'd; the actual files live under DHAKA-FLIX-<n> roots on three
+ * servers. An ftpbd URL's category decides which roots to try.
+ */
+const DHAKAFLIX_ROOTS: { match: (cat: string) => boolean; roots: string[] }[] = [
+  {
+    match: (c) => c === 'english movies',
+    roots: [
+      'http://172.16.50.7/DHAKA-FLIX-7/English%20Movies',
+      'http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29',
+    ],
+  },
+  {
+    match: (c) => c === 'hindi movies',
+    roots: ['http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies'],
+  },
+  {
+    match: (c) => c === 'south indian movies',
+    roots: [
+      'http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/South%20Movies',
+      'http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed',
+    ],
+  },
+  {
+    match: (c) => c.startsWith('animation'),
+    roots: [
+      'http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies%20%281080p%29',
+      'http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies',
+    ],
+  },
+  {
+    match: (c) => c.includes('tv') || c.includes('web series') || c.includes('web-series'),
+    roots: ['http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series'],
+  },
+  {
+    match: (c) => c.includes('kolkata') || c.includes('bangla'),
+    roots: ['http://172.16.50.7/DHAKA-FLIX-7/Kolkata%20Bangla%20Movies'],
+  },
+];
+
+/** Candidate DhakaFlix file URLs for an ftpbd URL, best roots first. */
+function dhakaflixCandidates(videoUrl: string): string[] {
   let u: URL;
   try {
     u = new URL(videoUrl);
   } catch {
-    return null;
+    return [];
   }
-  if (!/\.ftpbd\.net$/i.test(u.hostname)) return null;
-  const m = u.pathname.match(/^\/FTP-\d+(\/.*)$/);
-  if (!m) return null;
+  if (!/\.ftpbd\.net$/i.test(u.hostname)) return [];
+  const m = u.pathname.match(/^\/FTP-\d+\/([^/]+)\/?(.*)$/);
+  if (!m) return [];
+  let cat = '';
+  try {
+    cat = decodeURIComponent(m[1]).toLowerCase();
+  } catch {
+    cat = m[1].toLowerCase();
+  }
+  const rest = m[2];
+  const out: string[] = [];
+  for (const entry of DHAKAFLIX_ROOTS) {
+    if (entry.match(cat)) {
+      for (const r of entry.roots) out.push(r + (rest ? '/' + rest : ''));
+    }
+  }
+  // Last fallback: the old bare-portal guess.
+  out.push(`http://172.16.50.7/${m[1]}${rest ? '/' + rest : ''}`);
+  return out;
+}
 
+async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> {
+  if (IS_VERCEL_ENV) return null;
   const cached = localMirrorCache.get(videoUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.url;
 
-  const candidate = `http://172.16.50.7${m[1]}`;
+  const candidates = dhakaflixCandidates(videoUrl);
   let resolved: string | null = null;
-  try {
-    const probe = await fetch(candidate, {
-      headers: { Range: 'bytes=0-0', 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (probe.status === 200 || probe.status === 206) resolved = candidate;
+  for (const candidate of candidates) {
+    if (resolved) break;
     try {
-      await probe.body?.cancel();
-    } catch {}
-  } catch {}
-
-  if (!resolved) {
-    try {
-      const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
-      const { text, finalUrl } = await fetchUrlText(folderUrl, { timeoutMs: 6000 });
-      const listing = parseDirectoryHtml(text, finalUrl, 'backend');
-      const videos = listing.items.filter(
-        (i) => !i.isDirectory && /\.(mp4|mkv|webm|m4v|avi|ts)$/i.test(i.url)
-      );
-      videos.sort((a, b) => {
-        const aMp4 = /\.mp4(\?|$)/i.test(a.url) ? 1 : 0;
-        const bMp4 = /\.mp4(\?|$)/i.test(b.url) ? 1 : 0;
-        if (aMp4 !== bMp4) return bMp4 - aMp4;
-        return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+      const probe = await fetch(candidate, {
+        headers: { Range: 'bytes=0-0', 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(5000),
       });
-      if (videos.length > 0) {
-        resolved = videos[0].url;
-      } else {
-        // DhakaFlix folder pages are not always plain directory listings —
-        // fall back to scanning every href on the page for a video file.
-        const hrefVideos: string[] = [];
-        const hrefRe = /href="([^"]+)"/gi;
-        let hm: RegExpExecArray | null;
-        while ((hm = hrefRe.exec(text)) !== null) {
-          try {
-            const abs = new URL(hm[1], finalUrl).href;
-            if (
-              /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(abs) &&
-              !hrefVideos.includes(abs)
-            ) {
-              hrefVideos.push(abs);
-            }
-          } catch {}
-        }
-        hrefVideos.sort(
-          (a, b) =>
-            (/\.mp4(\?|$)/i.test(a) ? 0 : 1) - (/\.mp4(\?|$)/i.test(b) ? 0 : 1)
-        );
-        if (hrefVideos.length > 0) resolved = hrefVideos[0];
-      }
+      if (probe.status === 200 || probe.status === 206) resolved = candidate;
+      try {
+        await probe.body?.cancel();
+      } catch {}
     } catch {}
+    if (!resolved) {
+      try {
+        const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
+        const { text, finalUrl } = await fetchUrlText(folderUrl, { timeoutMs: 6000 });
+        const listing = parseDirectoryHtml(text, finalUrl, 'backend');
+        const videos = listing.items.filter(
+          (i) => !i.isDirectory && /\.(mp4|mkv|webm|m4v|avi|ts)$/i.test(i.url)
+        );
+        videos.sort((a, b) => {
+          const aMp4 = /\.mp4(\?|$)/i.test(a.url) ? 1 : 0;
+          const bMp4 = /\.mp4(\?|$)/i.test(b.url) ? 1 : 0;
+          if (aMp4 !== bMp4) return bMp4 - aMp4;
+          return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+        });
+        if (videos.length > 0) {
+          resolved = videos[0].url;
+        } else {
+          // DhakaFlix folder pages are not always plain directory listings —
+          // fall back to scanning every href on the page for a video file.
+          const hrefVideos: string[] = [];
+          const hrefRe = /href="([^"]+)"/gi;
+          let hm: RegExpExecArray | null;
+          while ((hm = hrefRe.exec(text)) !== null) {
+            try {
+              const abs = new URL(hm[1], finalUrl).href;
+              if (
+                /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(abs) &&
+                !hrefVideos.includes(abs)
+              ) {
+                hrefVideos.push(abs);
+              }
+            } catch {}
+          }
+          hrefVideos.sort(
+            (a, b) =>
+              (/\.mp4(\?|$)/i.test(a) ? 0 : 1) - (/\.mp4(\?|$)/i.test(b) ? 0 : 1)
+          );
+          if (hrefVideos.length > 0) resolved = hrefVideos[0];
+        }
+      } catch {}
+    }
   }
 
   localMirrorCache.set(videoUrl, {
@@ -2533,15 +2596,8 @@ app.get(['/api/open-vlc', '/open-vlc'], async (req, res) => {
   }
   const resolved = await resolveLocalBdixMirror(raw);
   const finalUrl = resolved || raw;
-  // Diagnostic: the DhakaFlix address the server tried (null for non-ftpbd).
-  let attempted: string | null = null;
-  try {
-    const u = new URL(raw);
-    if (/\.ftpbd\.net$/i.test(u.hostname)) {
-      const m = u.pathname.match(/^\/FTP-\d+(\/.*)$/);
-      if (m) attempted = `http://172.16.50.7${m[1]}`;
-    }
-  } catch {}
+  // Diagnostic: the first DhakaFlix address the server tried (null for non-ftpbd).
+  const attempted = dhakaflixCandidates(raw)[0] || null;
   const vlcCandidates = [
     process.env.VLC_PATH || '',
     'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe',
@@ -2783,11 +2839,9 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
 }
 
-// Seed/featured titles point at public ftpbd mirrors, which may be dead
-// from the viewer's ISP. The same content lives on the private DhakaFlix
-// portal 172.16.50.7 under the same path (minus the /FTP-N prefix).
-// Swap an ftpbd URL for its reachable private twin: exact file first,
-// then a folder scan (filenames can differ on the private server).
+// The REAL DhakaFlix source tree (supplied by the user, 2026-10-24).
+// The old bare http://172.16.50.7/<Category>/ guess 404'd; files live
+// under DHAKA-FLIX-<n> roots on three servers. Category decides the roots.
 const mirrorCache = {};
 function fetchText(u, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -2822,26 +2876,49 @@ function isVideoFile(u) {
   const clean = u.split('?')[0].toLowerCase();
   return ['.mp4', '.mkv', '.webm', '.m4v'].some((e) => clean.endsWith(e));
 }
-async function resolveMirror(target) {
+const DHAKAFLIX_ROOTS = [
+  { keys: ['english movies'], roots: ['http://172.16.50.7/DHAKA-FLIX-7/English%20Movies', 'http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29'] },
+  { keys: ['hindi movies'], roots: ['http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies'] },
+  { keys: ['south indian movies'], roots: ['http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/South%20Movies', 'http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed'] },
+  { keys: ['animation'], roots: ['http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies%20%281080p%29', 'http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies'] },
+  { keys: ['tv', 'web series', 'web-series'], roots: ['http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series'] },
+  { keys: ['kolkata', 'bangla'], roots: ['http://172.16.50.7/DHAKA-FLIX-7/Kolkata%20Bangla%20Movies'] },
+];
+function dhakaflixCandidates(target) {
   try {
     const u = new URL(target);
-    if (!u.hostname.toLowerCase().endsWith('.ftpbd.net')) return target;
-    let rest = null;
-    if (u.pathname.indexOf('/FTP-') === 0) {
-      const idx = u.pathname.indexOf('/', 1);
-      if (idx > 0) {
-        const seg = u.pathname.slice(1, idx);
-        const num = seg.slice(4);
-        const isNum = seg.indexOf('FTP-') === 0 && num.length > 0 && num.split('').every((ch) => ch >= '0' && ch <= '9');
-        if (isNum) rest = u.pathname.slice(idx);
-      }
+    if (!u.hostname.toLowerCase().endsWith('.ftpbd.net')) return [];
+    if (u.pathname.indexOf('/FTP-') !== 0) return [];
+    const idx = u.pathname.indexOf('/', 1);
+    if (idx < 0) return [];
+    const seg = u.pathname.slice(1, idx);
+    const num = seg.slice(4);
+    const isNum = seg.indexOf('FTP-') === 0 && num.length > 0 && num.split('').every((ch) => ch >= '0' && ch <= '9');
+    if (!isNum) return [];
+    const after = u.pathname.slice(idx + 1);
+    const catSeg = after.indexOf('/') >= 0 ? after.slice(0, after.indexOf('/')) : after;
+    let cat = catSeg;
+    try { cat = decodeURIComponent(catSeg).toLowerCase(); } catch { cat = catSeg.toLowerCase(); }
+    const rest = after.indexOf('/') >= 0 ? after.slice(after.indexOf('/') + 1) : '';
+    const out = [];
+    for (const entry of DHAKAFLIX_ROOTS) {
+      let hit = false;
+      for (const k of entry.keys) { if (k === cat || (k.length < cat.length && cat.indexOf(k) >= 0)) hit = true; }
+      if (hit) { for (const r of entry.roots) out.push(r + (rest ? '/' + rest : '')); }
     }
-    if (!rest) return target;
+    out.push('http://172.16.50.7/' + catSeg + (rest ? '/' + rest : ''));
+    return out;
+  } catch { return []; }
+}
+async function resolveMirror(target) {
+  try {
+    const candidates = dhakaflixCandidates(target);
+    if (!candidates.length) return target;
     if (mirrorCache[target]) return mirrorCache[target];
-    const candidate = 'http://172.16.50.7' + rest;
     let resolved = null;
-    if (await probeFile(candidate)) resolved = candidate;
-    if (!resolved) {
+    for (const candidate of candidates) {
+      if (resolved) break;
+      if (await probeFile(candidate)) { resolved = candidate; break; }
       try {
         const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
         const page = await fetchText(folderUrl, 6000);
