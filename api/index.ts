@@ -1982,7 +1982,31 @@ async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> 
         if (aMp4 !== bMp4) return bMp4 - aMp4;
         return (b.sizeBytes || 0) - (a.sizeBytes || 0);
       });
-      if (videos.length > 0) resolved = videos[0].url;
+      if (videos.length > 0) {
+        resolved = videos[0].url;
+      } else {
+        // DhakaFlix folder pages are not always plain directory listings —
+        // fall back to scanning every href on the page for a video file.
+        const hrefVideos: string[] = [];
+        const hrefRe = /href="([^"]+)"/gi;
+        let hm: RegExpExecArray | null;
+        while ((hm = hrefRe.exec(text)) !== null) {
+          try {
+            const abs = new URL(hm[1], finalUrl).href;
+            if (
+              /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(abs) &&
+              !hrefVideos.includes(abs)
+            ) {
+              hrefVideos.push(abs);
+            }
+          } catch {}
+        }
+        hrefVideos.sort(
+          (a, b) =>
+            (/\.mp4(\?|$)/i.test(a) ? 0 : 1) - (/\.mp4(\?|$)/i.test(b) ? 0 : 1)
+        );
+        if (hrefVideos.length > 0) resolved = hrefVideos[0];
+      }
     } catch {}
   }
 
@@ -2509,6 +2533,15 @@ app.get(['/api/open-vlc', '/open-vlc'], async (req, res) => {
   }
   const resolved = await resolveLocalBdixMirror(raw);
   const finalUrl = resolved || raw;
+  // Diagnostic: the DhakaFlix address the server tried (null for non-ftpbd).
+  let attempted: string | null = null;
+  try {
+    const u = new URL(raw);
+    if (/\.ftpbd\.net$/i.test(u.hostname)) {
+      const m = u.pathname.match(/^\/FTP-\d+(\/.*)$/);
+      if (m) attempted = `http://172.16.50.7${m[1]}`;
+    }
+  } catch {}
   const vlcCandidates = [
     process.env.VLC_PATH || '',
     'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe',
@@ -2528,9 +2561,23 @@ app.get(['/api/open-vlc', '/open-vlc'], async (req, res) => {
       test: true,
       input: raw,
       resolved,
+      attempted,
       finalUrl,
       vlcFound: Boolean(vlcPath),
       vlcPath: vlcPath || null,
+    });
+    return;
+  }
+  // Never hand VLC a dead ftpbd URL: it can only show "input can't be
+  // opened". Say plainly that DhakaFlix did not have this title, and report
+  // the address that was tried so the user can check it in a browser.
+  if (!resolved && attempted) {
+    res.status(404).json({
+      ok: false,
+      error:
+        'DhakaFlix e ei movie ta khuje pelam na. Server theke khola (172.16.50.7) movie try koro.',
+      attempted,
+      finalUrl,
     });
     return;
   }
