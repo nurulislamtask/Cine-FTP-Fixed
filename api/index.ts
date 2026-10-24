@@ -2011,6 +2011,58 @@ function dhakaflixCandidates(videoUrl: string): string[] {
   return out;
 }
 
+// Direct HTML fetch for DhakaFlix listings. MUST NOT use fetchUrlText here:
+// that helper races the request against a Google Translate proxy, which can
+// return a garbage page for private 172.x URLs and poison the folder scan.
+async function fetchDirectHtml(url: string): Promise<{ text: string; finalUrl: string }> {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(6000),
+  });
+  if (res.status < 200 || res.status >= 300) throw new Error('HTTP ' + res.status);
+  const text = await res.text();
+  return { text, finalUrl: res.url || url };
+}
+
+// Pick the best video from one folder listing page (parsed items first,
+// raw href scan second for non-standard DhakaFlix pages).
+async function scanFolderForVideo(folderUrl: string): Promise<string | null> {
+  const { text, finalUrl } = await fetchDirectHtml(folderUrl);
+  const listing = parseDirectoryHtml(text, finalUrl, 'backend');
+  const videos = listing.items.filter(
+    (i) => !i.isDirectory && /\.(mp4|mkv|webm|m4v|avi|ts)$/i.test(i.url)
+  );
+  videos.sort((x, y) => {
+    const xMp4 = /\.mp4(\?|$)/i.test(x.url) ? 1 : 0;
+    const yMp4 = /\.mp4(\?|$)/i.test(y.url) ? 1 : 0;
+    if (xMp4 !== yMp4) return yMp4 - xMp4;
+    return (y.sizeBytes || 0) - (x.sizeBytes || 0);
+  });
+  if (videos.length > 0) return videos[0].url;
+  const hrefVideos: string[] = [];
+  const hrefRe = /href="([^"]+)"/gi;
+  let hm: RegExpExecArray | null;
+  while ((hm = hrefRe.exec(text)) !== null) {
+    try {
+      const abs = new URL(hm[1], finalUrl).href;
+      if (/\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(abs) && !hrefVideos.includes(abs)) {
+        hrefVideos.push(abs);
+      }
+    } catch {}
+  }
+  hrefVideos.sort(
+    (x, y) => (/\.mp4(\?|$)/i.test(x) ? 0 : 1) - (/\.mp4(\?|$)/i.test(y) ? 0 : 1)
+  );
+  return hrefVideos.length > 0 ? hrefVideos[0] : null;
+}
+
+// Title token from an ftpbd folder name: 'Trap-2024' -> 'trap'.
+// Matched as a whole word so 'trap' never matches 'entrapment'.
+function titleToken(folderName: string): string {
+  const base = folderName.replace(/[-_ ]?(19|20)\d{2}$/, '');
+  return base.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> {
   if (IS_VERCEL_ENV) return null;
   const cached = localMirrorCache.get(videoUrl);
@@ -2020,6 +2072,7 @@ async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> 
   let resolved: string | null = null;
   for (const candidate of candidates) {
     if (resolved) break;
+    // 1) Exact file.
     try {
       const probe = await fetch(candidate, {
         headers: { Range: 'bytes=0-0', 'User-Agent': 'Mozilla/5.0' },
@@ -2030,44 +2083,69 @@ async function resolveLocalBdixMirror(videoUrl: string): Promise<string | null> 
         await probe.body?.cancel();
       } catch {}
     } catch {}
+    // 2) Exact folder scan (filename may differ, e.g. .mkv original).
     if (!resolved) {
       try {
-        const folderUrl = candidate.slice(0, candidate.lastIndexOf('/') + 1);
-        const { text, finalUrl } = await fetchUrlText(folderUrl, { timeoutMs: 6000 });
-        const listing = parseDirectoryHtml(text, finalUrl, 'backend');
-        const videos = listing.items.filter(
-          (i) => !i.isDirectory && /\.(mp4|mkv|webm|m4v|avi|ts)$/i.test(i.url)
+        resolved = await scanFolderForVideo(
+          candidate.slice(0, candidate.lastIndexOf('/') + 1)
         );
-        videos.sort((a, b) => {
-          const aMp4 = /\.mp4(\?|$)/i.test(a.url) ? 1 : 0;
-          const bMp4 = /\.mp4(\?|$)/i.test(b.url) ? 1 : 0;
-          if (aMp4 !== bMp4) return bMp4 - aMp4;
-          return (b.sizeBytes || 0) - (a.sizeBytes || 0);
-        });
-        if (videos.length > 0) {
-          resolved = videos[0].url;
-        } else {
-          // DhakaFlix folder pages are not always plain directory listings —
-          // fall back to scanning every href on the page for a video file.
-          const hrefVideos: string[] = [];
+      } catch {}
+    }
+    // 3) Year-folder title search: the folder name on DhakaFlix may differ
+    // ('Trap (2024)', 'Trap.2024', ...) — find any folder/file in the parent
+    // folder whose name contains the title as a whole word.
+    if (!resolved) {
+      try {
+        const pathSegs = candidate.split('/').filter(Boolean);
+        // pathSegs: ['http:', host, ...root, year?, folder, file]
+        const folderSeg = pathSegs[pathSegs.length - 2];
+        const parentFolder =
+          candidate.split('/').slice(0, -2).join('/') + '/';
+        let folderName = folderSeg;
+        try {
+          folderName = decodeURIComponent(folderSeg);
+        } catch {}
+        const token = titleToken(folderName);
+        if (token) {
+          const { text, finalUrl } = await fetchDirectHtml(parentFolder);
+          const hrefs: string[] = [];
           const hrefRe = /href="([^"]+)"/gi;
           let hm: RegExpExecArray | null;
           while ((hm = hrefRe.exec(text)) !== null) {
             try {
               const abs = new URL(hm[1], finalUrl).href;
-              if (
-                /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(abs) &&
-                !hrefVideos.includes(abs)
-              ) {
-                hrefVideos.push(abs);
-              }
+              if (!hrefs.includes(abs)) hrefs.push(abs);
             } catch {}
           }
-          hrefVideos.sort(
-            (a, b) =>
-              (/\.mp4(\?|$)/i.test(a) ? 0 : 1) - (/\.mp4(\?|$)/i.test(b) ? 0 : 1)
+          const wordRe = new RegExp(
+            '(^|[^a-z0-9])' + token.replace(/[^a-z0-9]+/g, '[^a-z0-9]+') + '([^a-z0-9]|$)'
           );
-          if (hrefVideos.length > 0) resolved = hrefVideos[0];
+          const matches = hrefs.filter((h) => {
+            let name = '';
+            try {
+              name = decodeURIComponent(
+                new URL(h).pathname.split('/').filter(Boolean).pop() || ''
+              ).toLowerCase();
+            } catch {}
+            return wordRe.test(name);
+          });
+          matches.sort((x, y) => {
+            const xV = /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(x) ? 0 : 1;
+            const yV = /\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(y) ? 0 : 1;
+            return xV - yV;
+          });
+          for (const m of matches) {
+            if (/\.(mp4|mkv|webm|m4v|avi|ts)(\?|$)/i.test(m)) {
+              resolved = m;
+              break;
+            }
+            try {
+              resolved = await scanFolderForVideo(
+                m.endsWith('/') ? m : m + '/'
+              );
+              if (resolved) break;
+            } catch {}
+          }
         }
       } catch {}
     }
@@ -2934,6 +3012,56 @@ async function resolveMirror(target) {
         hrefs.sort((a, b) => (a.toLowerCase().includes('.mp4') ? 0 : 1) - (b.toLowerCase().includes('.mp4') ? 0 : 1));
         if (hrefs.length) resolved = hrefs[0];
       } catch {}
+      if (!resolved) {
+        try {
+          const segs = candidate.split('/').filter(Boolean);
+          const folderSeg = segs[segs.length - 2];
+          const parentFolder = candidate.split('/').slice(0, -2).join('/') + '/';
+          let folderName = folderSeg;
+          try { folderName = decodeURIComponent(folderSeg); } catch {}
+          const cleanName = folderName.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const nameWords = cleanName.split(' ').filter(Boolean);
+          const lastWord = nameWords[nameWords.length - 1] || '';
+          const isYear = lastWord.length === 4 && (lastWord.indexOf('19') === 0 || lastWord.indexOf('20') === 0) && lastWord.split('').every((ch) => ch >= '0' && ch <= '9');
+          const tokenWords = isYear ? nameWords.slice(0, -1) : nameWords;
+          const token = tokenWords.join(' ');
+          if (token) {
+            const page = await fetchText(parentFolder, 6000);
+            const allHrefs = [];
+            const re2 = /href="([^"]+)"/gi;
+            let mm2;
+            while ((mm2 = re2.exec(page.text)) !== null) {
+              try {
+                const abs = new URL(mm2[1], parentFolder).href;
+                if (allHrefs.indexOf(abs) < 0) allHrefs.push(abs);
+              } catch {}
+            }
+            const matches = allHrefs.filter((h) => {
+              let name = '';
+              try { name = decodeURIComponent(new URL(h).pathname.split('/').filter(Boolean).pop() || '').toLowerCase(); } catch {}
+              const nameWordList = name.split(/[^a-z0-9]+/).filter(Boolean); return tokenWords.length > 0 && tokenWords.every((w) => nameWordList.indexOf(w) >= 0);
+            });
+            matches.sort((a, b) => (isVideoFile(a) ? 0 : 1) - (isVideoFile(b) ? 0 : 1));
+            for (const mh of matches) {
+              if (isVideoFile(mh)) { resolved = mh; break; }
+              try {
+                const sub = await fetchText(mh.endsWith('/') ? mh : mh + '/', 6000);
+                const subHrefs = [];
+                const re3 = /href="([^"]+)"/gi;
+                let mm3;
+                while ((mm3 = re3.exec(sub.text)) !== null) {
+                  try {
+                    const abs = new URL(mm3[1], mh.endsWith('/') ? mh : mh + '/').href;
+                    if (isVideoFile(abs)) subHrefs.push(abs);
+                  } catch {}
+                }
+                subHrefs.sort((a, b) => (a.toLowerCase().includes('.mp4') ? 0 : 1) - (b.toLowerCase().includes('.mp4') ? 0 : 1));
+                if (subHrefs.length) { resolved = subHrefs[0]; break; }
+              } catch {}
+            }
+          }
+        } catch {}
+      }
     }
     mirrorCache[target] = resolved || target;
     return mirrorCache[target];
